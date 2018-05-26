@@ -8,6 +8,8 @@
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
+#include "spline.h"
+#include "vehicle.h"
 
 using namespace std;
 
@@ -199,14 +201,24 @@ int main() {
   	map_waypoints_dx.push_back(d_x);
   	map_waypoints_dy.push_back(d_y);
   }
-
-  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+  Vehicle ego=Vehicle(1,0,0,0.0,0.0,"KL");
+  ego.max_acceleration=0.75;
+  ego.lanes_available=3;
+  ego.target_speed=48.2;
+  ego.goal_s=30;
+  //int lane=1;
+  double lane_size=4;
+  map<int,vector<double>> previous_state;
+  int count=0;
+  //double ref_vel=0.0;
+  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy,&ego,&previous_state,&count](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
     // The 2 signifies a websocket event
     //auto sdata = string(data).substr(0, length);
     //cout << sdata << endl;
+   
     if (length && length > 2 && data[0] == '4' && data[1] == '2') {
 
       auto s = hasData(data);
@@ -238,12 +250,202 @@ int main() {
           	auto sensor_fusion = j[1]["sensor_fusion"];
 
           	json msgJson;
-
-          	vector<double> next_x_vals;
-          	vector<double> next_y_vals;
-
+          
+          	
+                double ref_x=car_x;
+                double ref_y=car_y;
+                double ref_yaw=deg2rad(car_yaw);
+                
+                vector<double> ptsx;
+          	vector<double> ptsy;
 
           	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
+                 count++;
+                 //if(count==299){count=0;previous_state.clear();}
+                 if(car_speed>30){ego.max_acceleration=0.224;}
+                 if(car_speed>20&&car_speed<30){ego.max_acceleration=0.448;}
+                 if(car_speed>10&&car_speed<20){ego.max_acceleration=0.75;}
+                 if(car_speed<10){ego.max_acceleration=1;}
+
+                 int path_size = previous_path_x.size();
+                 ego.current_s=car_s;
+                
+                if(path_size>0)
+                {
+                   car_s=end_path_s;
+                 }
+                 ego.s=car_s;
+                 ego.d=car_d;
+                 ego.ref_vel=car_speed;
+                bool too_close=false;
+                map<int,vector<Vehicle>> predictions;
+                for(int i=0;i<sensor_fusion.size();i++)
+                {      
+                     int idx=sensor_fusion[i][0];
+                     double vx=sensor_fusion[i][3];
+                     double vy=sensor_fusion[i][4];
+                     double check_speed=sqrt(vx*vx+vy*vy);
+                     double other_s=sensor_fusion[i][5];
+                     double other_d=sensor_fusion[i][6];
+                     int other_lane;
+                     if(other_d<4 && other_d>=0)
+                        other_lane=0;
+                     else if(other_d<8 && other_d>=4)
+                        other_lane=1;
+                     else if(other_d<=12 && other_d>=8)
+                         other_lane=2;
+                     else
+                          continue;
+                     Vehicle temp=Vehicle(other_lane,other_s,other_d,0.0,0.0);
+                     temp.ref_vel=check_speed;
+                      if(previous_state.find(idx)==previous_state.end())
+                        { temp.s_v=check_speed;
+                          vector<double> state={other_s,other_d,check_speed,0.0};
+                          previous_state[idx]=state;
+                           }
+                      else
+                        {
+                          vector<double> temp_state=previous_state[idx];
+                          temp.s_v=temp.s-temp_state[0];
+                          temp.d_v=temp.d-temp_state[1];
+                          temp.s_a=temp.s_v-temp_state[2];
+                          temp.d_a=temp.d_v-temp_state[3];
+                          temp_state[0]=temp.s;
+                          temp_state[1]=temp.d;
+                          temp_state[2]=temp.s_v;
+                          temp_state[3]=temp.d_v;
+                          previous_state[idx]=temp_state;
+                         }
+                       predictions[idx]=temp.generate_predictions(path_size,2);
+
+                 }
+
+                /*
+                for(int i=0;i<sensor_fusion.size();i++)
+                {
+                 float d=sensor_fusion[i][6];
+                 if(d<(2+4*lane+2)&& d>(2+4*lane-2))
+                 {
+                     double vx=sensor_fusion[i][3];
+                     double vy=sensor_fusion[i][4];
+                     double check_speed=sqrt(vx*vx+vy*vy);
+                     double check_car_s=sensor_fusion[i][5];
+                     check_car_s+=((double)path_size*0.02*check_speed);
+                     if((check_car_s>car_s)&& (check_car_s-car_s)<30)
+                      {
+                         
+                         too_close=true;
+                      }
+                  }
+                }
+               
+               if(too_close)
+                  {
+                    ref_vel-=0.224;
+                   }
+               else if(ref_vel<49.5)
+                 {
+                    ref_vel+=0.224;
+                    
+                  }
+                */
+                   
+               if(path_size == 0)
+               {
+                  
+                 double prev_car_x = car_x-cos(car_yaw);
+                 double prev_car_y = car_y-sin(car_yaw);
+                 ptsx.push_back(prev_car_x);
+                 ptsx.push_back(car_x);
+                 ptsy.push_back(prev_car_y);
+                 ptsy.push_back(car_y);
+                }
+                else
+               {
+                  ref_x = previous_path_x[path_size-1];
+                  ref_y = previous_path_y[path_size-1];
+
+                 double ref_x2 = previous_path_x[path_size-2];
+                 double ref_y2 = previous_path_y[path_size-2];
+                 ref_yaw = atan2(ref_y-ref_y2,ref_x-ref_x2);
+                 
+                 ptsx.push_back(ref_x2);
+                 ptsx.push_back(ref_x);
+                 ptsy.push_back(ref_y2);
+                 ptsy.push_back(ref_y);
+               }
+             
+             vector<Vehicle> trajectory=ego.choose_next_state(predictions);
+            // cout<<trajectory.size()<<endl;
+             for(int i=0;i<trajectory.size();i++)
+             {
+                 vector<double> wp=getXY(trajectory[i].s,2+4*trajectory[i].lane,map_waypoints_s,map_waypoints_x,map_waypoints_y);
+                 
+                 ptsx.push_back(wp[0]);
+                 ptsy.push_back(wp[1]); 
+                 
+             }
+
+            /*
+             vector<double> wp0=getXY(car_s+30,2+4*lane,map_waypoints_s,map_waypoints_x,map_waypoints_y);
+             vector<double> wp1=getXY(car_s+60,2+4*lane,map_waypoints_s,map_waypoints_x,map_waypoints_y);
+             vector<double> wp2=getXY(car_s+90,2+4*lane,map_waypoints_s,map_waypoints_x,map_waypoints_y);
+
+             ptsx.push_back(wp0[0]);
+             ptsx.push_back(wp1[0]);
+             ptsx.push_back(wp2[0]);
+
+             ptsy.push_back(wp0[1]);
+             ptsy.push_back(wp1[1]);
+             ptsy.push_back(wp2[1]);
+            */
+           for(int i=0;i<ptsx.size();i++)
+            {
+               double shift_x=ptsx[i]-ref_x;
+               double shift_y=ptsy[i]-ref_y;
+               ptsx[i]=(shift_x*cos(0-ref_yaw)-shift_y*sin(0-ref_yaw));
+               ptsy[i]=(shift_x*sin(0-ref_yaw)+shift_y*cos(0-ref_yaw));
+            }
+
+             
+          tk::spline s;
+
+          s.set_points(ptsx,ptsy);
+        
+          vector<double> next_x_vals;
+          vector<double> next_y_vals;
+          
+          
+          for(int i = 0; i < path_size; i++)
+          {
+              next_x_vals.push_back(previous_path_x[i]);
+              next_y_vals.push_back(previous_path_y[i]);
+          }
+          
+         double target_x = 28;
+         double target_y = s(target_x);
+         double target_dist=sqrt((target_x)*(target_x)+(target_y)*(target_y));
+         double x_add_on=0;
+          for(int i = 1; i < 35-path_size; i++)
+          {    
+              double N=target_dist/(0.02*ego.ref_vel/(2.24));
+              double x_point=x_add_on+(target_x/N);
+              double y_point=s(x_point);
+
+              x_add_on=x_point;
+              double x_ref=x_point;
+              double y_ref=y_point;
+              
+              x_point=x_ref*cos(ref_yaw)-y_ref*sin(ref_yaw);
+              y_point=x_ref*sin(ref_yaw)+y_ref*cos(ref_yaw);
+
+              x_point+=ref_x;
+              y_point+=ref_y;
+              next_x_vals.push_back(x_point);
+              next_y_vals.push_back(y_point);
+
+          } 
+
           	msgJson["next_x"] = next_x_vals;
           	msgJson["next_y"] = next_y_vals;
 
